@@ -1,7 +1,7 @@
-# Fork patches in vendor/doubletake
+# Fork patches in doubletake-samsung
 
-The doubletake fork in `vendor/doubletake` is based on omarroth/doubletake at commit `5e2f1cb`
-(2026-10-29) and carries five local patches. Patches 1–4 are probe hooks of the `DOUBLETAKE_*`
+This repo is a fork of [omarroth/doubletake](https://github.com/omarroth/doubletake) at commit
+`5e2f1cb` (2026-10-29) and carries five local patches. Patches 1–4 are probe hooks of the `DOUBLETAKE_*`
 env-var style; none changes default behavior when unset. Patch 5 changes the default audio
 capture source. Upstreaming them would be welcome — see upstream issue #30.
 
