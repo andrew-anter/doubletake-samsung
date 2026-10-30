@@ -1,7 +1,7 @@
 # Fork patches in doubletake-samsung
 
 This repo is a fork of [omarroth/doubletake](https://github.com/omarroth/doubletake) at commit
-`5e2f1cb` (2026-10-29) and carries five local patches. Patches 1–4 are probe hooks of the `DOUBLETAKE_*`
+`5e2f1cb` (2026-10-29) and carries six local patches. Patches 1–4 and 6 are probe hooks of the `DOUBLETAKE_*`
 env-var style; none changes default behavior when unset. Patch 5 changes the default audio
 capture source. Upstreaming them would be welcome — see upstream issue #30.
 
@@ -72,6 +72,21 @@ This is the one fork patch that changes default behavior. It also drops the
 this machine: `pulsesrc device=@DEFAULT_MONITOR@` negotiates 44.1 kHz stereo,
 and `StartAudioCapture` produces compressed ALAC frames through the full
 timestamped pipeline.
+
+## 6. `DOUBLETAKE_MONITOR=<output>` — internal/airplay/capture.go
+
+On the X11 fallback path, `ximagesrc` grabs the full combined X screen and the crop
+(`detectMonitor`, formerly `detectPrimaryMonitor`) hardcoded primary-then-first-connected, so on
+an extended multi-monitor X11 setup there was no way to send a non-primary output. With the env
+var set to an xrandr output name (e.g. `DP-1`), a first pass selects the connected output whose
+first whitespace field matches; a name that matches nothing connected (or only outputs without
+parseable geometry, e.g. disconnected lines) logs a debug warning and falls back to the
+primary/first logic — the stream never hard-fails. Empty/unset is upstream behavior
+byte-for-byte. Strictly the X11 branch: the read site is the `detectMonitor` call inside the
+`ximagesrc` argument setup, and the Wayland/portal path (restore tokens, `DOUBLETAKE_RESTORE_SCOPE`)
+is untouched. Covered by `TestDetectMonitorSelectsRequestedOutput`,
+`TestDetectMonitorFallsBackToFirstConnectedWithoutPrimary`, and `TestParseXrandrGeometry` in
+`capture_x11_test.go`, which put a fake `xrandr` on `PATH`.
 
 ## Not patched (observed, non-fatal)
 

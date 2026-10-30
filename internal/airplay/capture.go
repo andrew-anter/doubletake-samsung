@@ -1700,11 +1700,12 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xname=%s", cfg.X11WindowName))
 		dbg("[CAPTURE] capturing X11 window name=%q", cfg.X11WindowName)
 	} else {
-		// Detect primary monitor geometry — ximagesrc captures the full X screen
+		// Detect monitor geometry — ximagesrc captures the full X screen
 		// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
-		// we don't need, so crop to the primary monitor. The encoded resolution is
-		// then the primary monitor's native resolution (no rescaling).
-		startX, startY, endX, endY := detectPrimaryMonitor(startupCtx, display)
+		// we don't need, so crop to the primary monitor, or to the output named by
+		// $DOUBLETAKE_MONITOR when set. The encoded resolution is then the chosen
+		// monitor's native resolution (no rescaling).
+		startX, startY, endX, endY := detectMonitor(startupCtx, display, os.Getenv(MonitorEnv))
 		if endX > startX && endY > startY {
 			ximageSrcArgs = append(ximageSrcArgs,
 				fmt.Sprintf("startx=%d", startX),
@@ -1856,16 +1857,49 @@ func (sc *ScreenCapture) Stop() {
 	})
 }
 
-// detectPrimaryMonitor queries xrandr to find the primary monitor's geometry.
-// Returns (startX, startY, endX, endY) bounding the primary monitor, where
-// endX = startX + monitor_width and endY = startY + monitor_height. If
+// MonitorEnv names the environment variable selecting which connected X11
+// output ximagesrc capture crops to (the X11 fallback path only; Wayland
+// capture picks its monitor through the portal). The value is an xrandr output
+// name such as "DP-1". Empty (unset) keeps the historical primary-monitor
+// behavior.
+const MonitorEnv = "DOUBLETAKE_MONITOR"
+
+// detectMonitor queries xrandr to find the geometry of the monitor to crop X11
+// capture to. want names a connected output (its first whitespace field, e.g.
+// "DP-1"); when want is empty the primary monitor is used, falling back to the
+// first connected output with a usable geometry. A want that matches no
+// connected output (or only ones without parseable geometry) logs a debug
+// warning and uses the same primary/first fallback rather than failing the
+// stream. Returns (startX, startY, endX, endY) bounding the chosen monitor,
+// where endX = startX + monitor_width and endY = startY + monitor_height. If
 // detection fails it returns all zeros, meaning no cropping should be applied.
-func detectPrimaryMonitor(ctx context.Context, display string) (startX, startY, endX, endY int) {
+func detectMonitor(ctx context.Context, display, want string) (startX, startY, endX, endY int) {
 	// Run xrandr to get connected outputs with geometry
 	out, err := exec.CommandContext(normalizeContext(ctx), "xrandr", "--display", display, "--query").Output()
 	if err != nil {
 		dbg("[CAPTURE] xrandr failed: %v, skipping monitor crop", err)
 		return 0, 0, 0, 0
+	}
+
+	// An explicit monitor selection wins when it names a connected output with
+	// parseable geometry. Lines look like "DP-3 connected primary 1920x1080+0+0";
+	// the first whitespace field is the output name, and "disconnected" lines
+	// never contain the bare " connected" marker.
+	if want != "" {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, " connected") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) == 0 || fields[0] != want {
+				continue
+			}
+			if x, y, w, h, ok := parseXrandrGeometry(line); ok {
+				dbg("[CAPTURE] %s monitor: %dx%d at +%d+%d (requested via %s)", want, w, h, x, y, MonitorEnv)
+				return x, y, x + w, y + h
+			}
+		}
+		dbg("[CAPTURE] %s=%q names no connected output with geometry, using primary/first monitor", MonitorEnv, want)
 	}
 
 	// Parse lines like: "DP-3 connected primary 1920x1080+0+0"

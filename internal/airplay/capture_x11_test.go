@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,6 +160,153 @@ func TestX11CaptureRejectsStaleDisplayWithGStreamerEvidence(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > captureStartupProbeTimeout(cfg.FPS)+2*time.Second {
 		t.Fatalf("stale DISPLAY validation took %v", elapsed)
+	}
+}
+
+// installFakeXrandr puts an executable `xrandr` script on PATH that ignores
+// its arguments and prints output. Tests calling it must use t.Setenv (as this
+// helper does for PATH), so they cannot run in parallel.
+func installFakeXrandr(t *testing.T, output string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "xrandr")
+	// Heredoc quoting keeps the canned query verbatim; the script ignores the
+	// --display/--query arguments detectMonitor passes.
+	body := "#!/bin/sh\ncat <<'DOUBLETAKE_TEST_XRANDR_END'\n" + output + "DOUBLETAKE_TEST_XRANDR_END\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake xrandr: %v", err)
+	}
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatalf("chmod fake xrandr: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const fakeXrandrPrimaryQuery = `Screen 0: minimum 8 x 8, current 3840 x 1080, maximum 32767 x 32767
+DP-3 connected primary 1920x1080+1920+0 (normal left inverted right x axis y axis) 527mm x 296mm
+	1920x1080     60.00*+  59.94    50.00
+DP-1 connected 1920x1080+0+0 (normal left inverted right x axis y axis) 527mm x 296mm
+	1920x1080     60.00*+
+HDMI-0 disconnected (normal left inverted right x axis y axis)
+DP-4 connected (normal left inverted right x axis y axis) 527mm x 296mm
+`
+
+const fakeXrandrNoPrimaryQuery = `Screen 0: minimum 8 x 8, current 3200 x 1024, maximum 32767 x 32767
+DP-1 connected 1920x1080+0+0 (normal left inverted right x axis y axis) 527mm x 296mm
+	1920x1080     60.00*+
+DP-2 connected 1280x1024+1920+0 (normal left inverted right x axis y axis) 527mm x 296mm
+	1280x1024     60.00*+
+`
+
+func TestDetectMonitorSelectsRequestedOutput(t *testing.T) {
+	installFakeXrandr(t, fakeXrandrPrimaryQuery)
+	ctx := context.Background()
+
+	tests := []struct {
+		name                       string
+		want                       string
+		startX, startY, endX, endY int
+	}{
+		// The secondary is not the primary; selecting it must win over the
+		// primary-first fallback.
+		{"secondary by name", "DP-1", 0, 0, 1920, 1080},
+		{"primary by name", "DP-3", 1920, 0, 3840, 1080},
+		// Unknown names fall back to the primary instead of failing.
+		{"unknown name falls back to primary", "NOPE-9", 1920, 0, 3840, 1080},
+		// HDMI-0 is present but disconnected: it must be ignored.
+		{"disconnected name falls back to primary", "HDMI-0", 1920, 0, 3840, 1080},
+		// DP-4 is connected but has no parseable geometry.
+		{"unparseable name falls back to primary", "DP-4", 1920, 0, 3840, 1080},
+		// Empty keeps the legacy primary behavior.
+		{"empty keeps legacy primary behavior", "", 1920, 0, 3840, 1080},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			startX, startY, endX, endY := detectMonitor(ctx, ":99", tc.want)
+			if startX != tc.startX || startY != tc.startY || endX != tc.endX || endY != tc.endY {
+				t.Fatalf("detectMonitor(want=%q) = (%d, %d, %d, %d), want (%d, %d, %d, %d)",
+					tc.want, startX, startY, endX, endY, tc.startX, tc.startY, tc.endX, tc.endY)
+			}
+		})
+	}
+}
+
+func TestDetectMonitorFallsBackToFirstConnectedWithoutPrimary(t *testing.T) {
+	installFakeXrandr(t, fakeXrandrNoPrimaryQuery)
+	ctx := context.Background()
+
+	startX, startY, endX, endY := detectMonitor(ctx, ":99", "")
+	if startX != 0 || startY != 0 || endX != 1920 || endY != 1080 {
+		t.Fatalf("detectMonitor without primary = (%d, %d, %d, %d), want (0, 0, 1920, 1080)",
+			startX, startY, endX, endY)
+	}
+
+	// An explicit selection still works when no primary line exists.
+	startX, startY, endX, endY = detectMonitor(ctx, ":99", "DP-2")
+	if startX != 1920 || startY != 0 || endX != 3200 || endY != 1024 {
+		t.Fatalf("detectMonitor(want=DP-2) without primary = (%d, %d, %d, %d), want (1920, 0, 3200, 1024)",
+			startX, startY, endX, endY)
+	}
+}
+
+func TestParseXrandrGeometry(t *testing.T) {
+	tests := []struct {
+		name  string
+		line  string
+		x, y  int
+		w, h  int
+		valid bool
+	}{
+		{
+			name:  "primary with comments",
+			line:  "DP-3 connected primary 1920x1080+1920+0 (normal left inverted right x axis y axis) 527mm x 296mm",
+			x:     1920, y: 0, w: 1920, h: 1080, valid: true,
+		},
+		{
+			name:  "secondary without primary",
+			line:  "DP-1 connected 1920x1080+0+0 (normal left inverted right x axis y axis)",
+			x:     0, y: 0, w: 1920, h: 1080, valid: true,
+		},
+		{
+			name:  "disconnected line has no geometry",
+			line:  "HDMI-0 disconnected (normal left inverted right x axis y axis)",
+			valid: false,
+		},
+		{
+			name:  "connected with no mode",
+			line:  "DP-4 connected (normal left inverted right x axis y axis) 527mm x 296mm",
+			valid: false,
+		},
+		{
+			name:  "sub-640 width is rejected",
+			line:  "DP-5 connected 512x384+0+0 (normal left inverted right x axis y axis)",
+			valid: false,
+		},
+		{
+			name:  "negative offset",
+			line:  "DP-6 connected 1280x1024+-1920+0 (normal left inverted right x axis y axis)",
+			x:     -1920, y: 0, w: 1280, h: 1024, valid: true,
+		},
+		{
+			name:  "incomplete geometry is rejected",
+			line:  "DP-7 connected 1280x1024 (normal left inverted right x axis y axis)",
+			valid: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			x, y, w, h, ok := parseXrandrGeometry(tc.line)
+			if ok != tc.valid {
+				t.Fatalf("parseXrandrGeometry(%q) ok = %t, want %t", tc.line, ok, tc.valid)
+			}
+			if !tc.valid {
+				return
+			}
+			if x != tc.x || y != tc.y || w != tc.w || h != tc.h {
+				t.Fatalf("parseXrandrGeometry(%q) = (%d, %d, %d, %d), want (%d, %d, %d, %d)",
+					tc.line, x, y, w, h, tc.x, tc.y, tc.w, tc.h)
+			}
+		})
 	}
 }
 
