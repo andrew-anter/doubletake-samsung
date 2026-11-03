@@ -1122,32 +1122,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		return nil, err
 	}
 
-	// Only set the receiver's volume when this session actually carries audio.
-	// `volume: 0.000000` is 0 dB — full scale in AirPlay, not silence — so a
-	// video-only session would force the receiver to maximum on every connect.
-	// Sending -144 instead would be equally destructive of the user's setting;
-	// a session that transmits no audio has no use for the receiver's audio
-	// state and should leave its volume untouched.
-	if cfg.NoAudio {
-		dbg("[SETUP] no-audio session: skipping SET_PARAMETER volume")
-	} else {
-		// Positive dB values are invalid here and current receivers may
-		// interpret them as zero gain. Real senders send the sender's own
-		// slider value; 0 dB is this sender's fixed choice.
-		volumeBody := audioVolumeBody(false)
-		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil {
-			if !controlConnectionUsable {
-				return nil, fmt.Errorf("SET_PARAMETER volume: %w", err)
-			}
-			dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
-		} else {
-			dbg("[SETUP] SET_PARAMETER volume=0 sent")
-		}
-		// Send volume twice (pcap shows real senders do this)
-		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil && !controlConnectionUsable {
-			return nil, fmt.Errorf("repeat SET_PARAMETER volume: %w", err)
-		}
-	}
+	// Deliberately never write the receiver's volume at setup. `volume:
+	// 0.000000` is 0 dB — full scale in AirPlay, not silence — and this
+	// sender has no volume UI, so any fixed value discards the user's
+	// setting. Worse, receivers like Samsung's Tizen snapshot the speaker
+	// volume at session start and restore that snapshot when the session
+	// closes: commanding full scale on connect makes the TV jump to 100%
+	// after the cast ends. Leaving the receiver's volume untouched is the
+	// only behavior that preserves it across a session.
 
 	if timingProtocol == timingProtocolPTP {
 		// PTP uses the receiver's fixed 319/320 ports. The first socket was only

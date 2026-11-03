@@ -1014,9 +1014,12 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 	}
 }
 
-// A session that DOES carry audio must still set the receiver's volume, so the
-// -no-audio guard narrows that behaviour rather than removing it.
-func TestSetupMirrorWithAudioSetsReceiverVolume(t *testing.T) {
+// A session that carries audio must still NOT write the receiver's volume:
+// `volume: 0.000000` is 0 dB — full scale — and receivers that snapshot the
+// speaker volume at session start (Samsung Tizen) would restore 100% when
+// the session closes. The exact wantMethods sequence below fails if any
+// SET_PARAMETER sneaks back into setup.
+func TestSetupMirrorWithAudioLeavesReceiverVolumeUntouched(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		skipRecord bool
@@ -1341,15 +1344,6 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 					serverErr <- err
 					return
 				}
-			case "SET_PARAMETER":
-				if string(req.body) != "volume: 0.000000\r\n" {
-					serverErr <- fmt.Errorf("unexpected SET_PARAMETER body %q", string(req.body))
-					return
-				}
-				if err := writeRTSPTestResponse(conn, 200, nil, nil); err != nil {
-					serverErr <- err
-					return
-				}
 			case "POST":
 				if req.uri != "/feedback" {
 					serverErr <- fmt.Errorf("unexpected POST URI %s", req.uri)
@@ -1432,12 +1426,6 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 	if !skipRecord {
 		recordIndex = len(wantMethods)
 		wantMethods = append(wantMethods, "RECORD")
-	}
-	// The two volume SET_PARAMETERs are sent only when the session carries
-	// audio: `volume: 0.000000` is 0 dB — full scale — so a video-only
-	// session would force the receiver to maximum.
-	if !noAudio {
-		wantMethods = append(wantMethods, "SET_PARAMETER", "SET_PARAMETER")
 	}
 	wantMethods = append(wantMethods, "POST", "TEARDOWN")
 	got := make([]rtspTestRequest, 0, len(wantMethods))

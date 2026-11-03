@@ -1,9 +1,9 @@
 # Fork patches in doubletake-samsung
 
 This repo is a fork of [omarroth/doubletake](https://github.com/omarroth/doubletake) at commit
-`5e2f1cb` (2026-10-29) and carries six local patches. Patches 1–4 and 6 are probe hooks of the `DOUBLETAKE_*`
-env-var style; none changes default behavior when unset. Patch 5 changes the default audio
-capture source. Upstreaming them would be welcome — see upstream issue #30.
+`5e2f1cb` (2026-10-29) and carries seven local patches. Patches 1–4 and 6 are probe hooks of the `DOUBLETAKE_*`
+env-var style; none changes default behavior when unset. Patches 5 and 7 change default behavior
+(the audio capture source, and receiver-volume handling). Upstreaming them would be welcome — see upstream issue #30.
 
 ## 1. `DOUBLETAKE_TIMING=NTP|PTP` — internal/airplay/mirror.go
 
@@ -88,11 +88,31 @@ is untouched. Covered by `TestDetectMonitorSelectsRequestedOutput`,
 `TestDetectMonitorFallsBackToFirstConnectedWithoutPrimary`, and `TestParseXrandrGeometry` in
 `capture_x11_test.go`, which put a fake `xrandr` on `PATH`.
 
+## 7. Never write the receiver's volume at setup — internal/airplay/mirror.go
+
+Upstream sent `SET_PARAMETER volume: 0.000000` twice after RECORD on every
+audio-carrying session. In AirPlay `0.000000` is 0 dB — full scale — and
+doubletake has no volume UI, so this discarded the user's speaker setting on
+every connect. On the Samsung 58CU7000 it did worse: Tizen snapshots the
+speaker volume when an AirPlay session starts and restores that snapshot when
+the session closes, so the cast ended with the TV jumping to 100% no matter
+what the user had set before. (This was previously misattributed to pure
+firmware behavior — the HTTP 500 evidence in the note below came from a
+mid-session *mute* command, not from the setup-time write, which the TV
+applies.)
+
+The setup block is deleted outright, with a comment recording why. The
+daemon's explicit `SetAudioMuted` (user-initiated mute/unmute) is unchanged;
+`-no-audio` sessions were already skipping the write and still negotiate the
+audio stream as before. `TestSetupMirrorWithAudioLeavesReceiverVolumeUntouched`
+pins the exact RTSP method sequence so a SET_PARAMETER cannot sneak back into
+setup.
+
 ## Not patched (observed, non-fatal)
 
-- `SET_PARAMETER volume` → HTTP 500 on this firmware — unfixable sender-side. Confirmed
-  mid-session on a live 4K HEVC stream (daemon `mute` → `set audio muted=true: HTTP 500`).
-  The TV resets its speaker volume to 100% when an AirPlay session closes; that is Tizen
-  session-end behavior, not something the sender triggers.
+- Mid-session `SET_PARAMETER volume` (daemon `mute`) → HTTP 500 on this
+  firmware — unfixable sender-side; setup-time volume writes were removed
+  instead (patch 7). Confirmed on a live 4K HEVC stream
+  (daemon `mute` → `set audio muted=true: HTTP 500`).
 - H.264 NAL type 12 (filler) units are ignored by the stream packer (expected).
 - `[EVENT] channel` quirks seen on other receivers were not observed here.
