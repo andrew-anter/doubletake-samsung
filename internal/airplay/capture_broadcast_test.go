@@ -188,6 +188,10 @@ func TestBroadcastSinkCloseUnblocksBackpressuredFrame(t *testing.T) {
 }
 
 func TestBroadcastSinkNonblockingFrameQueueUsesNominalDuration(t *testing.T) {
+	// The assertions below count nominal frames against the stock 250 ms
+	// budget; DOUBLETAKE_RELAY_BUDGET_MS (an operator knob) must not leak in
+	// from the environment running the tests.
+	t.Setenv("DOUBLETAKE_RELAY_BUDGET_MS", "")
 	sink := newBroadcastSink(nil)
 	base := time.Now()
 	// A large or backward PTS gap can be caused by the upstream leaky queue; it
@@ -205,6 +209,10 @@ func TestBroadcastSinkNonblockingFrameQueueUsesNominalDuration(t *testing.T) {
 }
 
 func TestBroadcastSinkNominalDurationUsesConfiguredFrameRate(t *testing.T) {
+	// The assertions below count nominal frames against the stock 250 ms
+	// budget; DOUBLETAKE_RELAY_BUDGET_MS (an operator knob) must not leak in
+	// from the environment running the tests.
+	t.Setenv("DOUBLETAKE_RELAY_BUDGET_MS", "")
 	for _, test := range []struct {
 		fps             int
 		acceptedFrames  int
@@ -459,6 +467,10 @@ func TestBackpressuredByteBroadcastHandoff(t *testing.T) {
 }
 
 func TestLoneSharedTimestampedSinkDoesNotBackpressureCapture(t *testing.T) {
+	// The assertions below count nominal frames against the stock 250 ms
+	// budget; DOUBLETAKE_RELAY_BUDGET_MS (an operator knob) must not leak in
+	// from the environment running the tests.
+	t.Setenv("DOUBLETAKE_RELAY_BUDGET_MS", "")
 	base := time.Now()
 	frames := make([]VideoAccessUnit, 10)
 	for i := range frames {
@@ -494,6 +506,10 @@ func TestLoneSharedTimestampedSinkDoesNotBackpressureCapture(t *testing.T) {
 }
 
 func TestTimestampedSlowSinkDoesNotStallHealthyPeer(t *testing.T) {
+	// The assertions below count nominal frames against the stock 250 ms
+	// budget; DOUBLETAKE_RELAY_BUDGET_MS (an operator knob) must not leak in
+	// from the environment running the tests.
+	t.Setenv("DOUBLETAKE_RELAY_BUDGET_MS", "")
 	frames := make(chan VideoAccessUnit)
 	capture := &ScreenCapture{
 		frames: &channelVideoAccessUnitReader{frames: frames},

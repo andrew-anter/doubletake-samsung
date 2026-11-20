@@ -108,6 +108,43 @@ audio stream as before. `TestSetupMirrorWithAudioLeavesReceiverVolumeUntouched`
 pins the exact RTSP method sequence so a SET_PARAMETER cannot sneak back into
 setup.
 
+## 8. `DOUBLETAKE_RELAY_BUDGET_MS=<ms>` — internal/airplay/capture_broadcast.go
+
+`BroadcastSink` detaches a receiver whose encoded fan-out queue holds more than
+`broadcastSinkFrameQueueDuration` (250 ms) of nominal frames. That guard produced
+`read timestamped capture: broadcast sink backlog limit exceeded` and ended the cast whenever the
+TV's video socket stalled. The budget is too tight for Wi-Fi links with real jitter: the CU7000 on
+a 5 GHz DFS channel answers ICMP at ~45 ms average with ~300 ms maxima and 0 % loss, and one spike
+necessarily fills the queue past 250 ms.
+
+The hook is read per sink (positive integer milliseconds; unset keeps 250 ms, so stock behavior —
+and the four duration tests, which now pin the env to empty — is unchanged). mirrorling passes
+`MIRRORLING_RELAY_BUDGET_MS` (default 5000 ms) as `DOUBLETAKE_RELAY_BUDGET_MS`. The byte and chunk
+bounds still cap memory independently, so a longer budget cannot grow a queue past 8 MiB; a
+receiver that truly stops draining is still detached, just after the budget instead of a quarter
+second.
+
+## 9. Video frame write deadline follows the relay budget — internal/airplay/mirror.go
+
+`sendFrame` bounded every frame write with a hard 2 s deadline, so a receiver that stalled for two
+seconds failed the session with `send non-IDR: writev tcp …: i/o timeout` even when it resumed a
+moment later. The deadline now comes from `videoWriteDeadline()`: the relay budget with a 2 s
+floor, i.e. the same knob as patch 8. TCP is reliable — a late frame is decodable when the receiver
+resumes, and it drops superseded frames by PTS — so surviving the stall is strictly better than
+disconnecting. The queue budget still bounds memory, and a session whose receiver never resumes
+still ends (through the sink) once the budget expires.
+
+## 10. Audio survives transient routing errors — internal/airplay/audio.go
+
+One `sendto: network is unreachable` from the audio data socket ended audio for the rest of the
+session (`audio streaming error`) while video kept playing. The audio sockets are wildcard-bound
+(`[::]:port` from the port-range allocator), and a route flap or an interface re-addressing — a
+Wi-Fi roam, an IPv6 router-advertisement change — makes `sendto` fail once even though the link is
+back milliseconds later. `writeToReceiver` retries `ENETUNREACH`, `EHOSTUNREACH`, `ENETDOWN` and
+`EADDRNOTAVAIL` with exponential backoff (50 ms doubling, six attempts ≈ 1.5 s, covered by the
+receiver's jitter buffer) and only gives up on errors that will not heal. Both the plain and the
+RFC 2198 redundant paths go through it.
+
 ## Not patched (observed, non-fatal)
 
 - Mid-session `SET_PARAMETER volume` (daemon `mute`) → HTTP 500 on this

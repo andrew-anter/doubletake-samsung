@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	aeadchacha20poly1305 "github.com/aead/chacha20poly1305"
@@ -913,6 +914,38 @@ func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime ui
 	return as.sendAudioPacketWithPayloadTypeAndNonce(payload, rtpTime, seq, audioDataPayloadType, reuseNonce)
 }
 
+// transientSendError reports network errors worth retrying: a route flap or an
+// interface re-addressing (Wi-Fi roam, IPv6 router advertisement churn) makes
+// sendto fail once with ENETUNREACH even though the link is back a moment
+// later. Such an error used to end audio for the rest of the session while
+// video kept playing.
+func transientSendError(err error) bool {
+	return errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETDOWN) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
+// writeToReceiver sends one audio payload, riding out transient routing errors
+// for about 1.5 s (the TV's jitter buffer covers the gap) instead of silencing
+// the session permanently.
+func (as *AudioStream) writeToReceiver(packet []byte) error {
+	backoff := 50 * time.Millisecond
+	var err error
+	for attempt := range 6 {
+		if _, err = as.conn.WriteTo(packet, as.remoteAddr); err == nil {
+			return nil
+		}
+		if !transientSendError(err) || attempt == 5 {
+			return err
+		}
+		dbg("[AUDIO] transient send error (%v), retrying in %v", err, backoff)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	return err
+}
+
 func (as *AudioStream) sendAudioPacketWithPayloadTypeAndNonce(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) (uint64, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
@@ -923,7 +956,7 @@ func (as *AudioStream) sendAudioPacketWithPayloadTypeAndNonce(payload []byte, rt
 		// later packet can expose this sequence as missing.
 		as.rememberAudioPacket(seq, packet)
 	}
-	if _, err := as.conn.WriteTo(packet, as.remoteAddr); err != nil {
+	if err := as.writeToReceiver(packet); err != nil {
 		return usedNonce, err
 	}
 	as.advanceAudioRTPTimeLocked(rtpTime)
@@ -943,7 +976,7 @@ func (as *AudioStream) sendAudioREDPacket(redPayload, primary []byte, rtpTime ui
 	redPacket, _ := as.buildAudioPacketWithClearPrefixLocked(redPayload, clearPrefix, rtpTime, seq, audioREDPayloadType, nil)
 	primaryPacket, _ := as.buildAudioPacketLocked(primary, rtpTime, seq, audioDataPayloadType, nil)
 	as.rememberAudioPacket(seq, primaryPacket)
-	if _, err := as.conn.WriteTo(redPacket, as.remoteAddr); err != nil {
+	if err := as.writeToReceiver(redPacket); err != nil {
 		return err
 	}
 	as.advanceAudioRTPTimeLocked(rtpTime)

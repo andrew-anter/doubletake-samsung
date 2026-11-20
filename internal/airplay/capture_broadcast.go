@@ -3,6 +3,8 @@ package airplay
 import (
 	"errors"
 	"io"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -25,6 +27,12 @@ const (
 	// sustained backlog disconnects only that receiver instead. Byte and chunk
 	// bounds still cap memory independently; single-target handoff still waits
 	// with just one pending AU.
+	//
+	// A quarter second is short for real Wi-Fi: the Samsung CU7000 on a 5 GHz
+	// DFS channel averages ~45 ms of ping RTT against a ~300 ms maximum (0%
+	// loss), and each of those spikes detaches the receiver. Callers whose link
+	// behaves that way raise the budget with DOUBLETAKE_RELAY_BUDGET_MS
+	// (mirrorling sets 1000) instead of changing the default here.
 	broadcastSinkFrameQueueDuration = 250 * time.Millisecond
 
 	// Source shutdown normally races with consumers draining their last few
@@ -113,13 +121,40 @@ func newBroadcastSinkWithPolicy(owner *BroadcastCapture, backpressure bool) *Bro
 		owner:                 owner,
 		maxQueuedBytes:        broadcastSinkQueueBytes,
 		maxQueuedChunks:       broadcastSinkQueueChunks,
-		maxFrameQueueDuration: broadcastSinkFrameQueueDuration,
+		maxFrameQueueDuration: relayBudget(),
 		backpressure:          backpressure,
 		frameDuration:         frameDuration,
 		done:                  make(chan struct{}),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
+}
+
+// relayBudget is the encoded fan-out budget: how much nominal-frame time may
+// queue for one receiver before it is detached. DOUBLETAKE_RELAY_BUDGET_MS
+// overrides it (positive milliseconds only) — a link with known stalls can
+// trade latency for not being disconnected.
+func relayBudget() time.Duration {
+	if v := os.Getenv("DOUBLETAKE_RELAY_BUDGET_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return broadcastSinkFrameQueueDuration
+}
+
+// videoWriteDeadline bounds one video frame write. It follows the encoded
+// fan-out budget (floor: upstream's 2 s), so a receiver that stalls within the
+// budget is survived instead of disconnecting the session: TCP is reliable, the
+// frame is late rather than lost, and the receiver drops it by PTS when it
+// resumes. A stall longer than the budget ends the session through the sink,
+// which keeps the memory bound independent of this deadline.
+func videoWriteDeadline() time.Duration {
+	d := relayBudget()
+	if d < 2*time.Second {
+		return 2 * time.Second
+	}
+	return d
 }
 
 func newBroadcastSink(owner *BroadcastCapture) *BroadcastSink {

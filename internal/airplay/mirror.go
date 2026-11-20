@@ -2121,7 +2121,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, networkTimesta
 	bufs := net.Buffers{header[:], framePayload}
 	writeStarted := time.Now()
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(videoWriteDeadline()))
 	_, err := bufs.WriteTo(s.dataConn)
 	writeEnded := time.Now()
 	reportSlowWrite := writeEnded.Sub(writeStarted) >= 25*time.Millisecond &&
